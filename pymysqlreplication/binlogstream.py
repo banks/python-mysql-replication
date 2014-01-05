@@ -11,6 +11,20 @@ from .packet import BinLogPacketWrapper
 from .constants.BINLOG import TABLE_MAP_EVENT, ROTATE_EVENT
 from .event import NotImplementedEvent
 
+# have to be in constants.FlagsEvent.py
+#------------------------------------------
+# Last event of a statement */
+FLAG_STMT_END_F = 1 << 0
+# Value of the OPTION_NO_FOREIGN_KEY_CHECKS flag in thd->options */
+FLAG_NO_FOREIGN_KEY_CHECKS_F = 1 << 1
+# Value of the OPTION_RELAXED_UNIQUE_CHECKS flag in thd->options */
+FLAG_RELAXED_UNIQUE_CHECKS_F = 1 << 2
+#
+#        Indicates that rows in this event are complete, that is contain
+#        values for all columns of the table.
+#
+FLAG_COMPLETE_ROWS_F = 1 << 3
+
 class BinLogStreamReader(object):
     """Connect to replication stream and read event
     """
@@ -41,6 +55,7 @@ class BinLogStreamReader(object):
 
         #Store table meta information
         self.table_map = {}
+        self.dict_table_id = {}
         self.log_pos = log_pos
         self.log_file = log_file
 
@@ -151,9 +166,9 @@ class BinLogStreamReader(object):
                                                self._ctl_connection,
                                                self.__use_checksum)
             if binlog_event.event_type == TABLE_MAP_EVENT:
-                self.table_map[binlog_event.event.table_id] = \
-                    binlog_event.event.get_table()
-
+                if binlog_event.event.table_id not in self.table_map:
+                    self.table_map[binlog_event.event.table_id] = binlog_event.event.get_table()
+                    self.__manage_table_map(binlog_event.event.table_id)
             if binlog_event.event_type == ROTATE_EVENT:
                 self.log_pos = binlog_event.event.position
                 self.log_file = binlog_event.event.next_binlog
@@ -202,6 +217,44 @@ class BinLogStreamReader(object):
                     continue
                 else:
                     raise error
+
+    def __manage_if_last_event_of_statement(self,  event):
+        """
+        looking for flags to FLAG_STMT_END_F
+        if event is the last event of a statement
+        """
+        for row_event in last_event_statement:
+            if isinstance(event, row_event):
+                if event.flags & FLAG_STMT_END_F :
+                    key = "%s.%s" % (self.table_map[event.table_id].schema,self.table_map[event.table_id].table)
+
+                    # key exists ?
+                    if key in self.dict_table_id:
+                        # keep the last one
+                        del self.dict_table_id[key]
+
+                    # id exists ?
+                    if event.table_id in self.table_map:
+                        # del it
+                        del self.table_map[event.table_id]
+                    break
+
+    def __manage_table_map(self,  new_table_id):
+        """
+        # added by YD - 2013/12/12
+        Looking for a duplicate entry in self.table_map (same schema.table with old table_id)
+        from the new_table_id
+        """
+        key = "%s.%s" % (self.table_map[new_table_id].schema,self.table_map[new_table_id].table)
+
+        # key exists ?
+        if key in self.dict_table_id:
+            # get old entry
+            if self.dict_table_id[key] in self.table_map:
+                # del it
+                del self.table_map[self.dict_table_id[key]]
+        # keep the last one
+        self.dict_table_id[key] = new_table_id
 
     def __iter__(self):
         return iter(self.fetchone, None)
